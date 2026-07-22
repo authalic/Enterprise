@@ -128,7 +128,7 @@ def get_server_token(portalname, server, exp_min=90):
     """Returns a token that can be used by clients when working with the Server Admin API """
 
     # get Server credentials, stored outside version control
-    creds = helpers.get_credentials()
+    creds = get_credentials()
 
     # build the URL to the 'Generate Token' endpoint
     # https://developers.arcgis.com/rest/enterprise-administration/server/generatetoken/
