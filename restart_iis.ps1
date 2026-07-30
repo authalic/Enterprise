@@ -259,24 +259,46 @@ function Test-WebEndpoint {
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+    $handler = $null
+    $httpClient = $null
+    $request = $null
+    $response = $null
+    $cancellationSource = $null
+
     try {
+        $handler = [System.Net.Http.HttpClientHandler]::new()
 
-        $invokeParameters = @{
-            Uri                = $Uri
-            Method             = "Get"
-            TimeoutSec         = $TimeoutSeconds
-            ErrorAction        = "Stop"
-            MaximumRedirection = 5
-        }
+        # Follow redirects, matching the prior Invoke-WebRequest behavior.
+        $handler.AllowAutoRedirect = $true
+        $handler.MaxAutomaticRedirections = 5
 
-        if ($PSVersionTable.PSVersion.Major -ge 7) {
-            $invokeParameters.SkipHttpErrorCheck = $true
-        }
-        else {
-            $invokeParameters.UseBasicParsing = $true
-        }
+        $httpClient = [System.Net.Http.HttpClient]::new($handler)
 
-        $response = Invoke-WebRequest @invokeParameters
+        # Set an overall HttpClient timeout.
+        $httpClient.Timeout = [TimeSpan]::FromSeconds($TimeoutSeconds)
+
+        $request = [System.Net.Http.HttpRequestMessage]::new(
+            [System.Net.Http.HttpMethod]::Get,
+            $Uri
+        )
+
+        # Add a per-request cancellation token as an additional timeout guard.
+        $cancellationSource =
+            [System.Threading.CancellationTokenSource]::new()
+
+        $cancellationSource.CancelAfter(
+            [TimeSpan]::FromSeconds($TimeoutSeconds)
+        )
+
+        # Complete when the HTTP response headers arrive.
+        # Do not wait for or parse the entire response body.
+        $task = $httpClient.SendAsync(
+            $request,
+            [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead,
+            $cancellationSource.Token
+        )
+
+        $response = $task.GetAwaiter().GetResult()
 
         $stopwatch.Stop()
 
@@ -285,9 +307,25 @@ function Test-WebEndpoint {
         return [PSCustomObject]@{
             Success        = ($statusCode -eq 200)
             StatusCode     = $statusCode
-            StatusText     = $response.StatusDescription
+            StatusText     = $response.ReasonPhrase
             ErrorType      = $null
             ErrorMessage   = $null
+            DurationMillis = $stopwatch.ElapsedMilliseconds
+            CheckedAt      = Get-Date
+        }
+    }
+    catch [System.OperationCanceledException] {
+        $stopwatch.Stop()
+
+        return [PSCustomObject]@{
+            Success        = $false
+            StatusCode     = $null
+            StatusText     = $null
+            ErrorType      = $_.Exception.GetType().FullName
+            ErrorMessage   = (
+                "HTTP request exceeded the configured timeout of " +
+                "$TimeoutSeconds second(s)."
+            )
             DurationMillis = $stopwatch.ElapsedMilliseconds
             CheckedAt      = Get-Date
         }
@@ -295,38 +333,35 @@ function Test-WebEndpoint {
     catch {
         $stopwatch.Stop()
 
-        $statusCode = $null
-        $statusText = $null
-        $errorType = $_.Exception.GetType().FullName
-        $errorMessage = $_.Exception.Message
-
-        # Invoke-WebRequest commonly throws for HTTP 4xx and 5xx responses.
-        # The exact Response object differs between Windows PowerShell 5.1
-        # and newer PowerShell releases, so status extraction is defensive.
-        if ($null -ne $_.Exception.Response) {
-            try {
-                $statusCode = [int]$_.Exception.Response.StatusCode
-            }
-            catch {
-                $statusCode = $null
-            }
-
-            try {
-                $statusText = [string]$_.Exception.Response.StatusDescription
-            }
-            catch {
-                $statusText = $null
-            }
-        }
-
         return [PSCustomObject]@{
             Success        = $false
-            StatusCode     = $statusCode
-            StatusText     = $statusText
-            ErrorType      = $errorType
-            ErrorMessage   = $errorMessage
+            StatusCode     = $null
+            StatusText     = $null
+            ErrorType      = $_.Exception.GetType().FullName
+            ErrorMessage   = $_.Exception.Message
             DurationMillis = $stopwatch.ElapsedMilliseconds
             CheckedAt      = Get-Date
+        }
+    }
+    finally {
+        if ($null -ne $response) {
+            $response.Dispose()
+        }
+
+        if ($null -ne $request) {
+            $request.Dispose()
+        }
+
+        if ($null -ne $cancellationSource) {
+            $cancellationSource.Dispose()
+        }
+
+        if ($null -ne $httpClient) {
+            $httpClient.Dispose()
+        }
+
+        if ($null -ne $handler) {
+            $handler.Dispose()
         }
     }
 }
@@ -622,6 +657,11 @@ Write-IISServiceStates -Prefix "Startup service states"
 
 while ($true) {
     try {
+        Write-MonitorLog -Message (
+            "Beginning health check for '$Url' with a " +
+            "$RequestTimeoutSeconds-second timeout."
+        )
+
         $result = Test-WebEndpoint `
             -Uri $Url `
             -TimeoutSeconds $RequestTimeoutSeconds
@@ -752,10 +792,6 @@ while ($true) {
                 "$($_.Exception.Message)"
             )
     }
-
-    Write-MonitorLog -Message (
-        "Next health check in $CheckIntervalMinutes minute(s)."
-    )
 
     Start-Sleep -Seconds ($CheckIntervalMinutes * 60)
 }
