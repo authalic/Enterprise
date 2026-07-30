@@ -50,6 +50,11 @@ param (
     [ValidateRange(1, 1440)]
     [int]$CheckIntervalMinutes = 5,
 
+    # Number of seconds between retry attempts after a failed health check.
+    [Parameter()]
+    [ValidateRange(1, 3600)]
+    [int]$FailureRetrySeconds = 30,
+
     # Maximum number of seconds allowed for an HTTP request.
     [Parameter()]
     [ValidateRange(1, 600)]
@@ -656,6 +661,9 @@ Write-IISServiceStates -Prefix "Startup service states"
 
 
 while ($true) {
+    # By default, wait the normal interval before the next check.
+    $nextCheckDelaySeconds = $CheckIntervalMinutes * 60
+
     try {
         Write-MonitorLog -Message (
             "Beginning health check for '$Url' with a " +
@@ -671,7 +679,11 @@ while ($true) {
                 -Result $result `
                 -Context "Health check"
 
+            # A successful check resets the failure counter.
             $consecutiveFailures = 0
+
+            # Resume the normal health-check interval.
+            $nextCheckDelaySeconds = $CheckIntervalMinutes * 60
         }
         else {
             $consecutiveFailures++
@@ -693,9 +705,7 @@ while ($true) {
                     $minutesSinceLastRestartAttempt -ge
                     $RestartCooldownMinutes
                 ) {
-                    # Record the attempt time before beginning the restart.
-                    # This prevents an immediate repeated attempt if the
-                    # restart itself fails.
+                    # Record the restart attempt before beginning it.
                     $lastRestartAttempt = $currentTime
 
                     Write-MonitorLog `
@@ -708,7 +718,7 @@ while ($true) {
                         -StopTimeoutSeconds $ServiceStopTimeoutSeconds `
                         -StartTimeoutSeconds $ServiceStartTimeoutSeconds
 
-                    # Start a new failure sequence after the restart attempt.
+                    # Begin a new failure sequence after the restart attempt.
                     $consecutiveFailures = 0
 
                     if ($restartSucceeded) {
@@ -721,6 +731,10 @@ while ($true) {
                             Start-Sleep `
                                 -Seconds $ApplicationRecoverySeconds
                         }
+
+                        Write-MonitorLog -Message (
+                            "Beginning post-restart health check for '$Url'."
+                        )
 
                         $verificationResult = Test-WebEndpoint `
                             -Uri $Url `
@@ -735,26 +749,29 @@ while ($true) {
                                 "IIS recovery verification completed " +
                                 "successfully."
                             )
+
+                            # Return to the normal interval after recovery.
+                            $nextCheckDelaySeconds =
+                                $CheckIntervalMinutes * 60
                         }
                         else {
-                            # Count the failed post-restart check as the first
-                            # failure in a new sequence. The cooldown prevents
-                            # another immediate restart.
+                            # Treat the failed verification as the first
+                            # failure in a new sequence.
                             $consecutiveFailures = 1
 
                             Write-MonitorLog `
                                 -Level "WARNING" `
                                 -Message (
                                     "The IIS services are running, but the " +
-                                    "endpoint remains unhealthy. Restart " +
-                                    "cooldown is now in effect."
+                                    "endpoint remains unhealthy."
                                 )
+
+                            # Retry quickly after failed recovery verification.
+                            $nextCheckDelaySeconds = $FailureRetrySeconds
                         }
                     }
                     else {
-                        # Retain one failure following an unsuccessful restart
-                        # so monitoring does not treat the application as
-                        # healthy. The cooldown still prevents a restart loop.
+                        # Preserve one failure after an unsuccessful restart.
                         $consecutiveFailures = 1
 
                         Write-MonitorLog `
@@ -763,6 +780,10 @@ while ($true) {
                                 "IIS restart was unsuccessful. Monitoring will " +
                                 "continue, and the restart cooldown will apply."
                             )
+
+                        # Retry quickly, although the cooldown will prevent
+                        # another immediate restart attempt.
+                        $nextCheckDelaySeconds = $FailureRetrySeconds
                     }
                 }
                 else {
@@ -778,20 +799,33 @@ while ($true) {
                             "Approximately $remainingCooldownMinutes " +
                             "minute(s) remain."
                         )
+
+                    # Continue checking frequently while the cooldown applies.
+                    $nextCheckDelaySeconds = $FailureRetrySeconds
                 }
+            }
+            else {
+                # The failure threshold has not yet been reached.
+                # Retry after 30 seconds instead of the normal interval.
+                $nextCheckDelaySeconds = $FailureRetrySeconds
             }
         }
     }
     catch {
-        # This protects the continuous loop from unexpected errors outside
-        # the individual HTTP and service-management functions.
         Write-MonitorLog `
             -Level "ERROR" `
             -Message (
                 "Unexpected monitoring-loop error: " +
                 "$($_.Exception.Message)"
             )
+
+        # Retry unexpected loop errors after the shorter interval.
+        $nextCheckDelaySeconds = $FailureRetrySeconds
     }
 
-    Start-Sleep -Seconds ($CheckIntervalMinutes * 60)
+    Write-MonitorLog -Message (
+        "Next health check in $nextCheckDelaySeconds second(s)."
+    )
+
+    Start-Sleep -Seconds $nextCheckDelaySeconds
 }
