@@ -47,11 +47,10 @@ param (
     [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string[]]$Urls = @(
-        "https://central.udot.utah.gov/central/rest/services",
-        "https://server.example.com/arcgis/rest/services",
-        "https://server.example.com/arcgis/rest/services",
-        "https://server.example.com/arcgis/rest/services",
-        "https://server.example.com/another/rest/services"
+        "https://projects.udot.utah.gov/server/rest/services",
+        "https://projects.udot.utah.gov/design/rest/services",
+        "https://projects.udot.utah.gov/eticketing/rest/services",
+        "https://projects.udot.utah.gov/image/rest/services"
     ),
 
     # Number of minutes between checks when all endpoints are healthy.
@@ -97,7 +96,7 @@ param (
     # Log file location.
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$LogPath = "C:\Logs\IIS-HealthMonitor.log"
+    [string]$LogPath = "D:\PowerShell\projects_portal_connectivity\logs\IIS-HealthMonitor.log"
 )
 
 
