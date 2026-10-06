@@ -1,5 +1,13 @@
 
-### delete datastore backups
+### delete datastore backups: Central Portal
+
+# Central Portal contains two Data Store types
+#  - Relational Data Store
+#     - retention policy is part of the configuration, but is currently affected by bug (see below)
+#     - each backup is ~50GB
+#  - Object Store
+#     - does not have any setting to retain backups for a specified number of days
+#     - each backup is ~4 GB
 
 # Data Store Bug  **Relational Data Store 12.1 does not respect configured backup retention period**
 # Esri BUG-000187391
@@ -7,30 +15,43 @@
 
 
 # Summary:
-# this script will look at the Relational Data Store backups on a Data Store machine
+# this script will look at the backup folders on the Central Portal Data Store machine
+#   D:\arcgisdatastore\backup\object
+#   D:\arcgisdatastore\backup\relational
 # each backup is stored in a folder
-# if the newest file a folder, or the folder itself, is older than the retention limit, delete it
+# if the newest file a backup folder, or the folder itself, is older than the retention limit, delete it
 
 # written by:  Justin Johnson justinpjohnson@utah.gov
-# September 2026
+# October 2026
+# reconfigured to include Object Store
 
-# this can be removed and disabled when the bug is fixed in a future update
+# DO NOT DISABLE THIS SCRIPT
+#  or, if necessary, remove the Relational Data Store directory after the Bug has been resolved
 
 
 import os.path
+import logging
 from pathlib import Path
 from shutil import rmtree
 from datetime import datetime as dt
 from datetime import timedelta
 
 # path containing the backup directories
-backup_dir = r'D:\arcgisdatastore\backup\relational\dbbackup'
+backup_folders = [
+    r'D:\arcgisdatastore\backup\relational\dbbackup',
+    r'D:\arcgisdatastore\backup\object'
+    ]
 
 # delete any directory with last-edit age older than 'dt.timedelta(days=retention_days)'
 retention_days = 4
 
-# for naming the output log file
-log_portalname = "test"  # "projects", "regions", "roads", "central"
+# for naming the output log file  (comment all but one)
+log_portalname = [
+    "central",
+    # "projects",
+    # "regions",
+    # "roads"
+    ]
 
 # test mode active
 testing = True
@@ -39,8 +60,6 @@ testing = True
 ### Logging for scheduled tasks
 
 # start logging
-import logging
-
 global_log_level = logging.INFO
 
 logger = logging.getLogger("root")
@@ -51,8 +70,8 @@ logger.setLevel(global_log_level)
 logfile_folder = Path(r'logs')
 log_basename = "datastore"
 
-# filename of log file
-logfile_name = Path(f"{log_basename}_{log_portalname}")
+# filename of log file, from the list above
+logfile_name = Path(f"{log_basename}_{log_portalname[0]}")
 
 # add the .log suffix to the WindowsPath
 logfile = Path(logfile_folder, logfile_name).with_suffix('.log')
@@ -65,7 +84,7 @@ if not logfile.is_file():
         logger.error("Unable to create new log file. Path may be invalid.")
 
 
-## Formatters
+# Formatters
 # Set the format of the Log messages string written to the Formatter
 # ex:  Tue 2025-07-08 10:24:07 - INFO MODULE info-level message text here
 
@@ -78,7 +97,7 @@ fmt_style = "{"
 log_formatter = logging.Formatter(fmt=fmt_str, datefmt=fmt_date, style=fmt_style)
 
 
-## Handlers
+# Handlers
 # configure the Logger with a File Handler and output Stream Handler
 
 # File Handler
@@ -99,7 +118,6 @@ logger.addHandler(log_handler_stream)
 
 # usage:  logger.info("message")
 logger.info("***** Start *****")
-logger.info(f"Backup Directory:  {backup_dir}")
 logger.info(f"Retention Days: {retention_days}")
 
 # End of logging setup
@@ -107,30 +125,39 @@ logger.info(f"Retention Days: {retention_days}")
 
 ### functions
 
+def timestamp_string(timestamp):
+    '''returns a timestamp as a formatted string. Ex "2026-10-06 13:29:32" for logs'''
+
+    now_str = timestamp.strftime('%Y-%m-%d %H:%M:%S' )
+    # now_str = f"{now_str}.{timestamp.strftime('%f'):<.1}"  # adds decimal seconds
+
+    return now_str
+
+
+def duration_string(delta):
+    '''returns a datetime.timedelta as a formatted string. Ex: "2 days, 04:03:04 (H:M:S)" for logs'''
+
+    d_days = delta.days
+    d_sec = delta.seconds
+    d_hours = d_sec // 3600
+    d_min = ((d_sec - (d_hours * 3600)) // 60)
+    d_sec = d_sec - (d_hours * 3600) - (d_min * 60)
+
+    return f"{d_days:>2} days, {d_hours:>02}:{d_min:>02}:{d_sec:>02}"
+
+
 def get_directory_last_edit(dir_path):
-    '''Returns the most recent modification datetime of a directory or any file within it'''
+    '''Returns the most recent modification datetime of a directory as datetime'''
 
-    # Start with the root directory's own metadata modification time
-    latest_time = os.path.getmtime(dir_path)
+    # get the root directory metadata modification time
+    try:
+        dir_time = os.path.getmtime(dir_path)
 
-    # Recursively check all files and subdirectories
-    for root, dirs, files in os.walk(dir_path):
+    except (OSError, FileNotFoundError):
+        # Handle permissions or broken symlinks gracefully
+        logger.error(f"Error getting timestamp of directory: {dir_path}")
 
-        for item in dirs + files:
-            item_path = os.path.join(root, item)
-
-            try:
-                mtime = os.path.getmtime(item_path)
-                if mtime > latest_time:
-                    latest_time = mtime
-
-            except (OSError, FileNotFoundError):
-                # Handle permissions or broken symlinks gracefully
-                logger.error(f"Error getting timestamp of directory: {dir_path}")
-                continue
-
-    # return the timestamp of the folder or the most recently edited item within it
-    return dt.fromtimestamp(latest_time)
+    return dt.fromtimestamp(dir_time)
 
 
 def get_subdirectories(dir_path):
@@ -154,14 +181,15 @@ def get_subdirectories(dir_path):
 
                 # append the full path to the dir and the timestamp of its most recent edit
                 path_list.append([dir_full, last_mtime])
+                logger.info(f"  {dir_full}    last update: {timestamp_string(last_mtime)}")
 
     # sort the list by timestamp (ascending)
     path_list.sort(key=lambda x: x[1])
 
-    logger.info("Subfolders found:")
-
-    for path in path_list:
-        logger.info(f"  {path[0]:<48} last update: {str(path[1])}")
+    # log the paths in sorted order
+    # it can take a very long time to get the files individually.
+    # Skip this until the number is manageable
+    # Meanwhile, log them in the loop above as they are examined
 
     return path_list
 
@@ -171,7 +199,7 @@ def delete_oldest_dirs(path_list, retention_days, testing):
 
     logger.info(f"deleting subfolders older than retention limit")
     if testing:
-        logger.info("  TESTING mode enabled")
+        logger.info("  TESTING mode enabled. Deletable directories indicated below, with *TESTING*")
 
     dt_now = dt.now()
 
@@ -187,18 +215,27 @@ def delete_oldest_dirs(path_list, retention_days, testing):
             # folder is older than the rentention day limit
 
             if not testing:
-                logger.info(f"  deleting: {dir_path:<40} age: {dt_age}")
+                logger.info(f"  DELETING: {dir_path}    age: {duration_string(dt_age)}")
                 rmtree(dir_path)
             else:
                 # do not delete anything if testing is True
-                logger.info(f"  TESTING MODE: would have deleted {dir_path:<40} age: {dt_age}")
+                logger.info(f"  *TESTING* {dir_path}    age: {duration_string(dt_age)}")
         else:
-            logger.info(f"  NOT deleting: {dir_path:<40} age: {dt_age}")
+            logger.info(f"  SKIPPING: {str(dir_path)}    age: {duration_string(dt_age)}")
 
 
 if __name__ == '__main__':
 
-    path_list = get_subdirectories(backup_dir)
-    delete_oldest_dirs(path_list, retention_days, testing)
+    for backup_dir in backup_folders:
+        # check if the directory exists (this allows the same list to be used on all portals)
+
+        logger.info(f"Backup Directory:  {backup_dir}")
+        p = Path(backup_dir)
+
+        if p.is_dir():
+            path_list = get_subdirectories(backup_dir)
+            delete_oldest_dirs(path_list, retention_days, testing)
+        else:
+            logger.info(f"  {backup_dir} is not a valid directory")
 
     logging.shutdown()
