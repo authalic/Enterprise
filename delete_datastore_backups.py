@@ -1,34 +1,29 @@
+# %% [markdown]
+# # Bug Workaround: delete oldest data store backups
+# ## ArcGIS Data Store
+#   - relational data store saves backups in folders inside the folder at: `D:\arcgisdatastore\backup\relational\dbbackup`
+#   - backups are scheduled using:  `updatebackupschedule.bat`
+#   - retention day setting is at:  `updatebackupretaindays.bat`
+#
+# ## Bug
+# - **Relational Data Store 12.1 does not respect configured backup retention period**
+#   - BUG-000187391
+#   - https://my.esri.com/#/support/bugs/bugs?bugNumber=BUG-000187391
+#
+# ### Workaround
+# - Manually delete the ArcGIS Data Store 12.1 Relational Store backups from the backup location.
 
-### delete datastore backups: Central Portal
+# %% [markdown]
+# ## Future improvements
+#
+# - summarize the content for each folder in the archive directories
+#   - bytes contained
+#   - files contained
+#   - this could add some significant runtime on the Object store
+# - add elapsed time for folder deletion
+#   - yeah, this could be done by subtracting the timestamps, but still...
 
-# Central Portal contains two Data Store types
-#  - Relational Data Store
-#     - retention policy is part of the configuration, but is currently affected by bug (see below)
-#     - each backup is ~50GB
-#  - Object Store
-#     - does not have any setting to retain backups for a specified number of days
-#     - each backup is ~4 GB
-
-# Data Store Bug  **Relational Data Store 12.1 does not respect configured backup retention period**
-# Esri BUG-000187391
-# https://my.esri.com/#/support/bugs/bugs?bugNumber=BUG-000187391
-
-
-# Summary:
-# this script will look at the backup folders on the Central Portal Data Store machine
-#   D:\arcgisdatastore\backup\object
-#   D:\arcgisdatastore\backup\relational
-# each backup is stored in a folder
-# if the newest file a backup folder, or the folder itself, is older than the retention limit, delete it
-
-# written by:  Justin Johnson justinpjohnson@utah.gov
-# October 2026
-# reconfigured to include Object Store
-
-# DO NOT DISABLE THIS SCRIPT
-#  or, if necessary, remove the Relational Data Store directory after the Bug has been resolved
-
-
+# %%
 import os.path
 import logging
 from pathlib import Path
@@ -36,7 +31,17 @@ from shutil import rmtree
 from datetime import datetime as dt
 from datetime import timedelta
 
+# %%
+# get the timestamp of the start time
+# this determines the timedeltas used below
+
+start_ts = dt.now()
+
+# %%
 # path containing the backup directories
+# this is usually the path to the Relational Data Store backup folder
+# but can also include the path to an Object Store or another type
+
 backup_folders = [
     r'D:\arcgisdatastore\backup\relational\dbbackup',
     r'D:\arcgisdatastore\backup\object'
@@ -53,16 +58,39 @@ log_portalname = [
     # "roads"
     ]
 
-# test mode active
+# test mode active. True = will not delete anything. shows what would be deleted
 testing = True
 
+# %%
+def timestamp_string(timestamp):
+    '''returns a timestamp as a formatted string. Ex "2026-10-06 13:29:32" for logs'''
 
-### Logging for scheduled tasks
+    time_str = timestamp.strftime('%Y-%m-%d %H:%M:%S' )
+    # time_str = f"{time_str}.{now_dt.strftime('%f'):<.1}"  # adds decimal seconds
 
+    return time_str
+
+# %%
+def duration_string(delta):
+    '''formats a datetime.timedelta as a formatted string. Ex: "2 days, 04:03:04 (H:M:S)" for logs'''
+
+    d_days = delta.days
+    d_sec = delta.seconds
+    d_hours = d_sec // 3600
+    d_min = ((d_sec - (d_hours * 3600)) // 60)
+    d_sec = d_sec - (d_hours * 3600) - (d_min * 60)
+
+    # ex: 03d 04h 34m 07s
+    duration_str = f"{d_days:>02}d {d_hours:>02}h {d_min:>02}m {d_sec:>02}s"
+    return duration_str
+
+# %%
 # start logging
 global_log_level = logging.INFO
 
-logger = logging.getLogger("root")
+# logger = logging.getLogger("root")
+logger = logging.getLogger("datastore")
+
 logger.setLevel(global_log_level)
 
 # Log File
@@ -89,7 +117,7 @@ if not logfile.is_file():
 # ex:  Tue 2025-07-08 10:24:07 - INFO MODULE info-level message text here
 
 # Formatter config sets up defaults in the Handlers defied below
-fmt_str = "{asctime} - {levelname:<8} {name:<12} {message}"
+fmt_str = "{asctime} - {levelname:<8} {message}"
 fmt_date = "%Y-%m-%d %H:%M:%S"
 fmt_style = "{"
 
@@ -117,49 +145,25 @@ logger.addHandler(log_handler_file)
 logger.addHandler(log_handler_stream)
 
 # usage:  logger.info("message")
-logger.info("***** Start *****")
+logger.info(f"***** Start: {timestamp_string(start_ts)} *****")
 logger.info(f"Retention Days: {retention_days}")
 
-# End of logging setup
-
-
-### functions
-
-def timestamp_string(timestamp):
-    '''returns a timestamp as a formatted string. Ex "2026-10-06 13:29:32" for logs'''
-
-    now_str = timestamp.strftime('%Y-%m-%d %H:%M:%S' )
-    # now_str = f"{now_str}.{timestamp.strftime('%f'):<.1}"  # adds decimal seconds
-
-    return now_str
-
-
-def duration_string(delta):
-    '''returns a datetime.timedelta as a formatted string. Ex: "2 days, 04:03:04 (H:M:S)" for logs'''
-
-    d_days = delta.days
-    d_sec = delta.seconds
-    d_hours = d_sec // 3600
-    d_min = ((d_sec - (d_hours * 3600)) // 60)
-    d_sec = d_sec - (d_hours * 3600) - (d_min * 60)
-
-    return f"{d_days:>2} days, {d_hours:>02}:{d_min:>02}:{d_sec:>02}"
-
-
+# %%
 def get_directory_last_edit(dir_path):
     '''Returns the most recent modification datetime of a directory as datetime'''
 
     # get the root directory metadata modification time
     try:
+        # get the Unix timestamp <class 'float'>, ex: 1788470738.355496
         dir_time = os.path.getmtime(dir_path)
 
     except (OSError, FileNotFoundError):
-        # Handle permissions or broken symlinks gracefully
         logger.error(f"Error getting timestamp of directory: {dir_path}")
 
+    # convert timestamp (float) to datetime.datetime
     return dt.fromtimestamp(dir_time)
 
-
+# %%
 def get_subdirectories(dir_path):
     '''returns a list of subdirectories sorted by last edit timestamp'''
 
@@ -179,12 +183,28 @@ def get_subdirectories(dir_path):
         if os.path.isdir(dir_full):
             if item not in do_not_delete:
 
-                # append the full path to the dir and the timestamp of its most recent edit
-                path_list.append([dir_full, last_mtime])
-                logger.info(f"  {dir_full}    last update: {timestamp_string(last_mtime)}")
+
+                # append to path_list, a list containing:
+                #  full path to the dir
+                #  timestamp of its most recent edit
+                #  timedelta from the last edit to the start time of the script
+
+                dir_age = start_ts - last_mtime  # age of last edit as a timedelta
+                path_list.append([dir_full, last_mtime, dir_age])
+
+                # display only the folder name, not full path, log the timestamp of last update and the time delta
 
     # sort the list by timestamp (ascending)
     path_list.sort(key=lambda x: x[1])
+
+    # log the paths, with filename, last update timestamp, and age of dir
+
+    for path in path_list:
+        path_str = path[0]
+        pt_path = Path(path_str)
+        filename = pt_path.name
+
+        logger.info(f"  {filename:<32} updated: {timestamp_string(path[1])}   age: {duration_string(path[2])}")
 
     # log the paths in sorted order
     # it can take a very long time to get the files individually.
@@ -193,37 +213,38 @@ def get_subdirectories(dir_path):
 
     return path_list
 
-
+# %%
 def delete_oldest_dirs(path_list, retention_days, testing):
     '''deletes any path in path_list with last-edit date older than the retention day limit'''
 
-    logger.info(f"deleting subfolders older than retention limit")
+    logger.info(f"--deleting subfolders older than retention limit")
     if testing:
         logger.info("  TESTING mode enabled. Deletable directories indicated below, with *TESTING*")
-
-    dt_now = dt.now()
 
     # number of retention days as timedelta
     retention_days_delta = timedelta(days=retention_days)
 
     for dir_list in path_list:
 
-        dir_path = dir_list[0]         # full path to dir
-        dt_age = dt_now - dir_list[1]  # age of last edit as a timedelta
+        path_str = dir_list[0]            # full path to dir
+        pt_path = Path(path_str)
+        filename = pt_path.name
 
-        if dt_age > retention_days_delta:
+        dir_age = dir_list[2]  # age of last edit as a timedelta
+
+        if dir_age > retention_days_delta:
             # folder is older than the rentention day limit
 
             if not testing:
-                logger.info(f"  DELETING: {dir_path}    age: {duration_string(dt_age)}")
+                logger.info(f"  {'DELETING':<10}: {filename:<32}    age: {duration_string(dir_age)}")
                 rmtree(dir_path)
             else:
                 # do not delete anything if testing is True
-                logger.info(f"  *TESTING* {dir_path}    age: {duration_string(dt_age)}")
+                logger.info(f"  {'*TESTING*':<10}: {filename:<32}    age: {duration_string(dir_age)}")
         else:
-            logger.info(f"  SKIPPING: {str(dir_path)}    age: {duration_string(dt_age)}")
+            logger.info(f"  {'SKIPPING':<10}: {filename:<32}    age: {duration_string(dir_age)}")
 
-
+# %%
 if __name__ == '__main__':
 
     for backup_dir in backup_folders:
@@ -237,5 +258,10 @@ if __name__ == '__main__':
             delete_oldest_dirs(path_list, retention_days, testing)
         else:
             logger.info(f"  {backup_dir} is not a valid directory")
+
+
+    # log the stop time and duration
+    stop_ts = dt.now()
+    logger.info(f"done: {timestamp_string(stop_ts)}  elapsed: {duration_string(stop_ts - start_ts)}")
 
     logging.shutdown()
